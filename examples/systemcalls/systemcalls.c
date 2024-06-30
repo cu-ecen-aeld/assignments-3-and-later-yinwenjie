@@ -1,4 +1,8 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,7 +20,11 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
+    int ret = system(cmd);
+    if (ret != 0) {
+        return false;
+    }
+    
     return true;
 }
 
@@ -58,6 +66,32 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    fflush(stdout);
+    pid_t pid = fork();
+    int status;
+    if (pid < 0) {
+        return false;
+    } else if (pid == 0) {
+        execv(command[0], command);
+        exit( EXIT_FAILURE );
+    } else {
+        pid_t wpid;
+        wpid = waitpid(pid, &status, 0);
+        if (wpid == -1) {
+            perror("Error: wait.\n");
+            return false;
+        } else if (WIFSIGNALED(status)) {
+            printf("Child killed(signal:%d)\n", WTERMSIG(status));
+            return false;
+        } else if (!WIFEXITED(status)) {
+            printf("Child not exited normally\n");
+            return false;
+        } else if (status != 0) {
+            printf("Child returned with error\n");
+            return false;
+        }
+        return true;
+    }
 
     va_end(args);
 
@@ -92,6 +126,42 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int child_pid;
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0)
+    {
+        perror("Open output file failed.\n");
+        return false;
+    }
+    child_pid = fork();
+    int status;
+    if (child_pid < 0) {
+        // fork failed;
+        return false;
+    } else if (child_pid == 0) {
+        //child process
+        if (dup2(fd, 1) < 0) {
+            perror("dup2 failed.\n");
+            return false;
+        }
+        close(fd);
+        execv(command[0], command);
+        return false;
+    } else {
+        pid_t wpid;
+        wpid = waitpid(child_pid, &status, 0);
+        if (wpid == -1) {
+            perror("Error: wait.\n");
+            return false;
+        } else if (WIFSIGNALED(status)) {
+            printf("Child killed(signal:%d)\n", WTERMSIG(status));
+            return false;
+        } else if (status != 0) {
+            printf("Child returned with error\n");
+            return false;
+        }
+        return true;
+    }
 
     va_end(args);
 
