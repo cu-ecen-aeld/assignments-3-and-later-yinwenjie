@@ -1,7 +1,7 @@
 name: assignment-autotest-test
 on: [push]
 jobs:
-    full-test:
+    unit-test:
         container: cuaesd/aesd-autotest:unit-test
         runs-on: ubuntu-latest
         steps:
