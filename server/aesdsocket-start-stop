@@ -1,0 +1,24 @@
+#! /bin/sh
+
+# Define start & stop function
+start() {
+    echo "Starting aesdsocket"
+    start-stop-daemon -S --exec /usr/bin/aesdsocket -- -d
+}
+stop() {
+    echo "Stopping aesdsocket"
+    start-stop-daemon -K --exec /usr/bin/aesdsocket
+    rm /var/tmp/aesdsocketdata
+}
+
+case "$1" in
+    start)
+       start
+       ;;
+    stop)
+       stop
+       ;;
+    *)
+       echo "Usage: $0 {start|stop}"
+esac
+exit 0
