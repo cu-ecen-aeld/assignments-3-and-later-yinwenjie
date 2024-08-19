@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <syslog.h>
 #include <signal.h>
 #include <string.h>
 #include <fcntl.h>
@@ -13,6 +12,7 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 
+#include "aesd_thread.h"
 
 #define PORT "9000"
 #define FILE_PATH "/var/tmp/aesdsocketdata"
@@ -139,6 +139,18 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    // Init mutex
+    pthread_mutex_t mutex;
+    if (pthread_mutex_init(&mutex, NULL) != 0) {
+        syslog(LOG_ERR, "Init mutex failed");
+        close(server_socket);
+        return -1;
+    }
+
+    // Init pthread list
+    SLIST_HEAD(slisthead, slist_thread_s) thread_list;
+    SLIST_INIT(&thread_list);
+
     // Main loop to accept connections
     while (1) {
         struct sockaddr_storage cli_addr;
@@ -171,6 +183,49 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        // Create thread
+        pthread_t write_thread;
+        thread_data_t *pThreadData = (thread_data_t *)malloc(sizeof(thread_data_t));
+        if (!pThreadData) {
+            syslog(LOG_ERR, "Alloc thread data failed");
+            fclose(file);
+            file = NULL;
+            close(client_socket);
+            continue;
+        }
+        memset(pThreadData, 0, sizeof(thread_data_t));
+        pThreadData->pMutex = &mutex;
+        pThreadData->isCompleted = 0;
+        pThreadData->pFile = file;
+        pThreadData->clientFd = client_socket;
+        int ret = pthread_create(&write_thread, NULL, threadfunc, pThreadData);
+        if (ret != 0) {
+            syslog(LOG_ERR, "Alloc thread data failed");
+            fclose(file);
+            file = NULL;
+            close(client_socket);
+            free(pThreadData);
+            pThreadData = NULL;
+            continue;
+        } else {
+            syslog(LOG_INFO, "Create thread succeeded.");
+            printf("Create thread succeeded, thread fd: %lu\n", write_thread);
+            pThreadData->thread = write_thread;
+            slist_thread_t *threadListElem = malloc(sizeof(slist_thread_t));
+            if (!threadListElem) {
+                syslog(LOG_ERR, "Alloc slist_thread_t failed");
+                fclose(file);
+                file = NULL;
+                close(client_socket);
+                free(pThreadData);
+                pThreadData = NULL;
+                continue;
+            }
+            memset(threadListElem, 0, sizeof(slist_thread_t));
+            threadListElem->pThreadData = pThreadData;
+            SLIST_INSERT_HEAD(&thread_list, threadListElem, entries);
+        }
+
         char buffer[BUFFER_SIZE];
         ssize_t bytes_received = BUFFER_SIZE;
         char *data = NULL;
@@ -198,6 +253,23 @@ int main(int argc, char *argv[]) {
                 free(data);
                 data = NULL;
                 data_len = 0;
+            }
+        }
+
+        slist_thread_t *threadElem = NULL, *tempElem = NULL;
+        SLIST_FOREACH_SAFE(threadElem, &thread_list, entries, tempElem) {
+            if (threadElem->pThreadData->isCompleted) {
+                printf("Thread %lu completed. Joining...\n", threadElem->pThreadData->thread);
+                long long int thread_rtn;
+                int join_ret = pthread_join(threadElem->pThreadData->thread, (void*)&thread_rtn);
+                if (join_ret == 0) {
+                    printf("Thread %lu joined from client %d\n", threadElem->pThreadData->thread, threadElem->pThreadData->clientFd);
+                    SLIST_REMOVE(&thread_list, threadElem, slist_thread_s, entries);
+                    free(threadElem->pThreadData);
+                    free(threadElem);
+                } else {
+                    printf("Error: cannot join thread %lu, error:%d\n", threadElem->pThreadData->thread, join_ret);
+                }
             }
         }
 
