@@ -1,7 +1,7 @@
-CC = $(CROSS_COMPILE)gcc
-CFLAGS = -Wall -Werror -Wextra -O2
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -Wall -Werror -Wextra -O2
 
-TARGET = aesdsocket
+TARGET ?= aesdsocket
 
 SRCS = aesdsocket.c aesd_thread.c
 
