@@ -19,7 +19,14 @@
 #define FILE_PATH "/var/tmp/aesdsocketdata"
 #define BACKLOG 10
 
+#define USE_AESD_CHAR_DEVICE 1
+
+#ifndef USE_AESD_CHAR_DEVICE
 FILE *file = NULL;
+#else
+int file;
+#endif
+
 int server_socket = -1;
 int client_socket = -1;
 
@@ -50,10 +57,17 @@ static void timer_thread(union sigval sigval) {
     if ( pthread_mutex_lock(td->pMutex) != 0 ) {
         fprintf(stderr, "Error %d (%s) locking thread data!\n",errno,strerror(errno));
     } else {        
-        fseek(file, 0, SEEK_END);// move pointer to the end of the file
         sprintf(buffer, "timestamp:%s\n", timeStr);
         syslog(LOG_DEBUG, "Write to file: %s", buffer);
+#ifndef USE_AESD_CHAR_DEVICE
+        fseek(file, 0, SEEK_END); // move pointer to the end of the file
         fwrite(buffer, 1, strlen(buffer), file);
+#else
+        lseek(file, 0, SEEK_END); // move pointer to the end of the device
+        if(write(file, buffer, strlen(buffer)) < 0) {
+            perror("Error writing to character device");
+        }
+#endif
         if ( pthread_mutex_unlock(td->pMutex) != 0 ) {
             fprintf(stderr, "Error %d (%s) unlocking thread data!\n",errno,strerror(errno));
         }
@@ -68,10 +82,16 @@ void handle_signal(int signal) {
     if (server_socket != -1) {
         close(server_socket);
     }
-    if (file != NULL) {
+#ifndef USE_AESD_CHAR_DEVICE
+    if(file != NULL) {
         fclose(file);
     }
     remove(FILE_PATH);
+#else
+    if(file >= 0) {
+        close(file);
+    }
+#endif
     closelog();
     exit(0);
 }
@@ -176,14 +196,23 @@ int main(int argc, char* argv[]) {
     syslog(LOG_DEBUG, "server is now listening to port:%s\n", PORT);
 
     // 7.Open local data file
-    file = fopen(FILE_PATH, "w+"); // open file to read and write
-    if (!file) {
-        fprintf(stderr, "Cannot open file %s", FILE_PATH);
+#ifndef USE_AESD_CHAR_DEVICE
+    file = fopen(FILE_PATH, "w+");
+    if(!file) {
+        fprintf(stderr, "Cannot open file %s\n", FILE_PATH);
         close(server_socket);
-        closelog(); // close syslog 
+        closelog();
         return 1;
     }
-
+#else
+    file = open("/dev/aesdchar", O_RDWR);
+    if(file < 0) {
+        perror("Cannot open character device /dev/aesdchar");
+        close(server_socket);
+        closelog();
+        return 1;
+    }
+#endif
     // 8.Mutex for the file accessing
     pthread_mutex_t mutex;
     if (pthread_mutex_init(&mutex, NULL) != 0) {
