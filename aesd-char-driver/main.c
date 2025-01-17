@@ -18,6 +18,7 @@
 #include <linux/types.h>
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
+#include <linux/slab.h>
 #include "aesdchar.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
@@ -53,6 +54,7 @@ int aesd_release(struct inode *inode, struct file *filp)
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
+    ssize_t retval = 0;
     struct aesd_dev *dev = filp->private_data;
     size_t entry_offset;
     struct aesd_buffer_entry *entry;
