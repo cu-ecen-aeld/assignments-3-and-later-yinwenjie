@@ -20,6 +20,8 @@
 #include <linux/fs.h> // file_operations
 #include <linux/slab.h>
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
+
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -68,7 +70,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         if(available_bytes < count) {
             count = available_bytes;
         }
-        if(copy_to_user(buf, entry->buffptr, count)) {
+        if(copy_to_user(buf, entry->buffptr + entry_offset, count)) {
             retval = -EFAULT;
             PDEBUG("Error in copy to user function");
             goto clean;
@@ -82,9 +84,7 @@ clean:
     return retval;
 }
 
-ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
-                loff_t *f_pos)
-{
+ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos) {
     /* initialize the return value */
     ssize_t retval = -ENOMEM;
     /* check if filp pointer is valid */
@@ -169,34 +169,88 @@ clean:
     return retval;
 }
 
-loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
-{
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence) {
     struct aesd_dev *dev = filp->private_data;
-    loff_t retval;
+    loff_t newpos;
+    switch(whence) {
+        case SEEK_SET:
+            newpos =  off;
+            break;
+        case SEEK_CUR:
+            newpos = filp->f_pos + off;
+            break;
+        case SEEK_END:
+            newpos = dev->buffer_size + off;
+            break;
+        default:
+            return -EINVAL;
+    }
+    if(newpos < 0) {
+        return -EINVAL;
+    }
+    filp->f_pos = newpos;
+    return newpos;
+}
+
+long aesd_adjust_file_offset(struct file *filp, uint32_t write_cmd, uint32_t write_cmd_offset) {
+    long retval = 0;
+    struct aesd_dev *dev = filp->private_data;
+    long buffer_offset = 0;
     if(mutex_lock_interruptible(&dev->lock)) {
         PDEBUG("Error in Mutex locking");
         retval = -ERESTARTSYS;
         goto clean;
     }
-    retval = fixed_size_llseek(filp, off, whence, dev->buffer_size);
+    if(write_cmd >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED || write_cmd_offset > dev->circular_buffer.entry[write_cmd].size) {
+        retval = -EINVAL;
+        goto clean;
+    }
+    for(int i = 0; i < write_cmd; i++) {
+        buffer_offset += dev->circular_buffer.entry[i].size;
+    }
+    filp->f_pos = buffer_offset + write_cmd_offset;
+
 clean:
     mutex_unlock(&dev->lock);
     return retval;
 }
 
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+    struct aesd_dev *dev = filp->private_data;
+    struct aesd_seekto seekto;
+    long retval;
+    if(_IOC_TYPE(cmd) != AESD_IOC_MAGIC) {
+        return -ENOTTY;
+    }
+    if(_IOC_NR(cmd) != AESDCHAR_IOC_MAXNR) {
+        return -ENOTTY;
+    }
+    switch(cmd) {
+        case AESDCHAR_IOCSEEKTO:
+            if(copy_from_user(&seekto, (struct aesd_seekto __user *)arg, sizeof(seekto))) {
+                return -EFAULT;
+            } else {
+                retval = aesd_adjust_file_offset(filp, seekto.write_cmd, seekto.write_cmd_offset);
+            }
+            break;
+        default:
+            return -ENOTTY;
+    }
+    return retval;
+}
+
 struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
-    .llseek =   aesd_llseek,
+    .owner          = THIS_MODULE,
+    .read           = aesd_read,
+    .write          = aesd_write,
+    .open           = aesd_open,
+    .release        = aesd_release,
+    .llseek         = aesd_llseek,
+    .unlocked_ioctl = aesd_ioctl
 };
 
-static int aesd_setup_cdev(struct aesd_dev *dev)
-{
+static int aesd_setup_cdev(struct aesd_dev *dev) {
     int err, devno = MKDEV(aesd_major, aesd_minor);
-
     cdev_init(&dev->cdev, &aesd_fops);
     dev->cdev.owner = THIS_MODULE;
     dev->cdev.ops = &aesd_fops;
@@ -207,12 +261,10 @@ static int aesd_setup_cdev(struct aesd_dev *dev)
     return err;
 }
 
-int aesd_init_module(void)
-{
+int aesd_init_module(void) {
     dev_t dev = 0;
     int result;
-    result = alloc_chrdev_region(&dev, aesd_minor, 1,
-            "aesdchar");
+    result = alloc_chrdev_region(&dev, aesd_minor, 1, "aesdchar");
     aesd_major = MAJOR(dev);
     if (result < 0) {
         printk(KERN_WARNING "Can't get major %d\n", aesd_major);
@@ -223,26 +275,32 @@ int aesd_init_module(void)
     /**
      * TODO: initialize the AESD specific portion of the device
      */
+    aesd_circular_buffer_init(&aesd_device.circular_buffer);
+    aesd_device.entry_cache.buffptr = NULL;
+    aesd_device.entry_cache.size = 0;
+    mutex_init(&aesd_device.lock);
 
     result = aesd_setup_cdev(&aesd_device);
-
     if( result ) {
         unregister_chrdev_region(dev, 1);
     }
     return result;
-
 }
 
-void aesd_cleanup_module(void)
-{
+void aesd_cleanup_module(void) {
     dev_t devno = MKDEV(aesd_major, aesd_minor);
-
     cdev_del(&aesd_device.cdev);
 
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
-
+    struct aesd_buffer_entry *entry;
+    uint8_t index;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.circular_buffer, index)
+    {
+        kfree(entry->buffptr);
+    }
+    mutex_destroy(&aesd_device.lock);
     unregister_chrdev_region(devno, 1);
 }
 
