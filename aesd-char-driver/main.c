@@ -205,7 +205,8 @@ long aesd_adjust_file_offset(struct file *filp, uint32_t write_cmd, uint32_t wri
         retval = -EINVAL;
         goto clean;
     }
-    for(int i = 0; i < write_cmd; i++) {
+    int i;
+    for(i = 0; i < write_cmd; i++) {
         buffer_offset += dev->circular_buffer.entry[i].size;
     }
     filp->f_pos = buffer_offset + write_cmd_offset;
